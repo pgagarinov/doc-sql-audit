@@ -1,0 +1,126 @@
+---
+kind: sources
+name: doc-sql-audit-pg
+type: postgres
+host: 127.0.0.1
+port: 5432
+database: doc_sql_audit
+user: postgres
+password: ${PGPASSWORD}
+---
+kind: tools
+name: audit-unapproved-nonstandard
+type: postgres-sql
+source: doc-sql-audit-pg
+description: |
+  Find contract groups (main contract + supplementary agreements) where:
+  1) The group total amount exceeds 10,000 RUB
+  2) At least one contract in the group is non-standard (нестандартный)
+  3) At least one contract in the group lacks lawyer approval
+  4) The protocol does NOT contain permission to skip lawyer approval
+  Parent-child links are derived by regex-parsing contract_number at query time.
+statement: |
+  WITH parsed_contracts AS (
+      SELECT c.*,
+             substring(c.contract_number FROM
+               '(?:[дД]оп(?:олнительное|\.?)\s*(?:соглашение|согл\.?)|[дД]\.?\s*[сС]\.?|(?:^|\s)[дД][сС])\s*(?:№?\s*\d+\s+)?к\s+(?:договору|дог\.?)?\s*№?\s*(\d+)'
+             ) AS parent_num
+      FROM contracts c
+  ),
+  contract_groups AS (
+      SELECT pc.*,
+             COALESCE(parent.contract_id, pc.contract_id) AS group_id
+      FROM parsed_contracts pc
+      LEFT JOIN contracts parent
+        ON parent.contract_number = 'Договор ' || pc.parent_num
+  ),
+  group_totals AS (
+      SELECT group_id, SUM(amount) AS total_amount
+      FROM contract_groups
+      GROUP BY group_id
+      HAVING SUM(amount) > 10000
+  ),
+  groups_with_nonstandard AS (
+      SELECT DISTINCT group_id
+      FROM contract_groups
+      WHERE contract_type = 'нестандартный'
+  ),
+  groups_without_lawyer AS (
+      SELECT DISTINCT cg.group_id
+      FROM contract_groups cg
+      JOIN approvals a ON a.contract_id = cg.contract_id
+      WHERE a.lawyer = FALSE
+  ),
+  groups_with_protocol_permission AS (
+      SELECT DISTINCT cg.group_id
+      FROM contract_groups cg
+      JOIN protocols p ON p.protocol_id = cg.protocol_id
+      WHERE p.protocol_text ILIKE '%разрешено согласование без юристов%'
+  )
+  SELECT cg.contract_id, cg.contract_number, cg.amount,
+         cg.supplier, cg.contract_type, cg.group_id,
+         gt.total_amount AS group_total_amount
+  FROM contract_groups cg
+  JOIN group_totals gt ON gt.group_id = cg.group_id
+  JOIN groups_with_nonstandard gns ON gns.group_id = cg.group_id
+  JOIN groups_without_lawyer gwl ON gwl.group_id = cg.group_id
+  LEFT JOIN groups_with_protocol_permission gpp ON gpp.group_id = cg.group_id
+  WHERE gpp.group_id IS NULL
+  ORDER BY cg.group_id, cg.contract_id
+  LIMIT 100;
+---
+kind: tools
+name: supplier-similar-subjects
+type: postgres-sql
+source: doc-sql-audit-pg
+description: |
+  Find pairs of contracts from the same supplier with similar subjects
+  using PostgreSQL trigram similarity (pg_trgm). Returns pairs with
+  similarity score > 0.3, useful for detecting potential contract splitting.
+statement: |
+  SELECT c1.contract_number AS contract_1,
+         c2.contract_number AS contract_2,
+         c1.supplier,
+         c1.subject AS subject_1,
+         c2.subject AS subject_2,
+         similarity(c1.subject, c2.subject) AS sim_score,
+         c1.amount + c2.amount AS combined_amount
+  FROM contracts c1
+  JOIN contracts c2
+    ON c1.supplier = c2.supplier
+    AND c1.contract_id < c2.contract_id
+    AND similarity(c1.subject, c2.subject) > 0.3
+  ORDER BY c1.supplier, sim_score DESC
+  LIMIT 500;
+---
+kind: tools
+name: supplier-subject-summary
+type: postgres-sql
+source: doc-sql-audit-pg
+description: |
+  Group contracts by supplier and subject where the supplier has multiple
+  contracts with similar subjects (trigram similarity > 0.3). Shows aggregated
+  totals per supplier/subject combination, useful for identifying systematic
+  contract splitting patterns.
+statement: |
+  WITH similar_pairs AS (
+      SELECT c1.supplier,
+             c1.subject,
+             c1.contract_id, c1.contract_number, c1.amount
+      FROM contracts c1
+      WHERE EXISTS (
+          SELECT 1 FROM contracts c2
+          WHERE c2.supplier = c1.supplier
+            AND c2.contract_id != c1.contract_id
+            AND similarity(c1.subject, c2.subject) > 0.3
+      )
+  )
+  SELECT supplier,
+         subject,
+         string_agg(contract_number, ', ' ORDER BY contract_number) AS contract_numbers,
+         SUM(amount) AS total_amount,
+         COUNT(*) AS contract_count
+  FROM similar_pairs
+  GROUP BY supplier, subject
+  ORDER BY total_amount DESC
+  LIMIT 200;
