@@ -65,6 +65,10 @@ CREATE TABLE approvals (
 CREATE INDEX idx_contracts_supplier ON contracts(supplier);
 CREATE INDEX idx_contracts_number ON contracts(contract_number);
 CREATE INDEX idx_contracts_subject_trgm ON contracts USING gin (subject gin_trgm_ops);
+CREATE INDEX idx_contracts_protocol_id ON contracts(protocol_id);
+CREATE INDEX idx_contracts_type ON contracts(contract_type);
+CREATE INDEX idx_approvals_contract_id ON approvals(contract_id);
+CREATE INDEX idx_approvals_lawyer ON approvals(lawyer) WHERE lawyer = FALSE;
 """
 
 
