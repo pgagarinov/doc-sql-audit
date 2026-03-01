@@ -10,9 +10,15 @@ __pycache__/
 dist/
 build/
 *.egg
+.pytest_cache/
 
-# genai-toolbox binary
+# genai-toolbox binary (installed via brew)
 toolbox
+
+# Office temp files
+~$*.pptx
+~$*.docx
+~$*.xlsx
 
 # IDE
 .idea/
